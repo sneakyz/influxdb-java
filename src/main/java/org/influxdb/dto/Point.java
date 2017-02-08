@@ -1,5 +1,12 @@
 package org.influxdb.dto;
 
+import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Ordering;
+import com.google.common.escape.Escaper;
+import com.google.common.escape.Escapers;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.text.NumberFormat;
@@ -7,13 +14,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.TimeUnit;
-
-import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Ordering;
-import com.google.common.escape.Escaper;
-import com.google.common.escape.Escapers;
 
 /**
  * Representation of a InfluxDB database Point.
@@ -235,7 +235,7 @@ public class Point {
 	/**
 	 * @return the tags
 	 */
-	Map<String, String> getTags() {
+	public Map<String, String> getTags() {
 		return this.tags;
 	}
 
@@ -255,7 +255,11 @@ public class Point {
 		this.fields = fields;
 	}
 
-	/**
+  public Map<String, Object> getFields() {
+    return fields;
+  }
+
+  /**
 	 * {@inheritDoc}
 	 */
 	@Override

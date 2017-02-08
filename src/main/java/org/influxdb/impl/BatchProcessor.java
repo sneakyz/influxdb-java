@@ -1,22 +1,17 @@
 package org.influxdb.impl;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;
 import org.influxdb.InfluxDB;
 import org.influxdb.dto.BatchPoints;
 import org.influxdb.dto.Point;
 
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Maps;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.*;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * A BatchProcessor can be attached to a InfluxDB Instance to collect single point writes and
@@ -28,8 +23,8 @@ import com.google.common.collect.Maps;
 public class BatchProcessor {
 
 	private static final Logger logger = Logger.getLogger(BatchProcessor.class.getName());
-	protected final BlockingQueue<BatchEntry> queue = new LinkedBlockingQueue<>();
-	private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+	protected final BlockingQueue<BatchEntry> queue = new LinkedBlockingQueue<>(300000);
+	private final ExecutorService executor = Executors.newFixedThreadPool(1);
 	final InfluxDBImpl influxDB;
 	final int actions;
 	private final TimeUnit flushIntervalUnit;
@@ -137,15 +132,62 @@ public class BatchProcessor {
 		this.flushIntervalUnit = flushIntervalUnit;
 		this.flushInterval = flushInterval;
 
-		// Flush at specified Rate
-		this.scheduler.scheduleAtFixedRate(new Runnable() {
-			@Override
-			public void run() {
-				write();
-			}
-		}, this.flushInterval, this.flushInterval, this.flushIntervalUnit);
-
+    writeAsync();
 	}
+
+  // Flush at specified Rate
+  private void writeAsync() {
+    this.executor.submit(() -> {
+      long ts = System.currentTimeMillis();
+      while (true) {
+        try {
+          int timeRemaing = flushInterval;
+          long start = System.currentTimeMillis();
+
+          Map<String, BatchPoints> databaseToBatchPoints = Maps.newHashMap();
+          List<BatchEntry> batchEntries = new ArrayList<>(this.actions);
+          if (queue.size() > 100000) {
+            // Interval 5 seconds
+            if (start - ts > 5000) {
+              logger.warning("buffer point size: " + queue.size());
+              ts = start;
+            }
+          }
+
+          for (int i = 0; i < actions; i++) {
+            long wait = timeRemaing - (System.currentTimeMillis() - start);
+            if (wait <= 0) {
+              break;
+            }
+            BatchEntry entry = queue.poll(wait, TimeUnit.MILLISECONDS);
+            if (entry != null) {
+              batchEntries.add(entry);
+            }
+          }
+
+          for (BatchEntry batchEntry : batchEntries) {
+            String dbName = batchEntry.getDb();
+            if (!databaseToBatchPoints.containsKey(dbName)) {
+              BatchPoints batchPoints = BatchPoints.database(dbName).retentionPolicy(batchEntry.getRp()).build();
+              databaseToBatchPoints.put(dbName, batchPoints);
+            }
+            Point point = batchEntry.getPoint();
+            databaseToBatchPoints.get(dbName).point(point);
+          }
+          long t1 = System.currentTimeMillis();
+          for (BatchPoints batchPoints : databaseToBatchPoints.values()) {
+            BatchProcessor.this.influxDB.write(batchPoints);
+          }
+          long t2 = System.currentTimeMillis() - t1;
+          if (t2 > 500) {
+            logger.warning("write " + batchEntries.size() + " points, " + t2 + " mills");
+          }
+        } catch (Throwable t) {
+          logger.log(Level.SEVERE, "Batch could not be sent. Data is lost", t);
+        }
+      }
+    });
+  }
 
 	void write() {
 		try {
@@ -154,8 +196,18 @@ public class BatchProcessor {
 			}
 
 			Map<String, BatchPoints> databaseToBatchPoints = Maps.newHashMap();
-			List<BatchEntry> batchEntries = new ArrayList<>(this.queue.size());
-			this.queue.drainTo(batchEntries);
+			List<BatchEntry> batchEntries = new ArrayList<>(this.actions);
+      if (queue.size() > 100000) {
+        logger.warning("buffer point size: " + queue.size());
+      }
+      for (int i = 0; i < actions; i++) {
+        BatchEntry entry = queue.poll();
+        if (entry == null) {
+          break;
+        } else {
+          batchEntries.add(entry);
+        }
+      }
 
 			for (BatchEntry batchEntry : batchEntries) {
 				String dbName = batchEntry.getDb();
@@ -183,9 +235,9 @@ public class BatchProcessor {
 	 *            the batchEntry to write to the cache.
 	 */
 	void put(final BatchEntry batchEntry) {
-		this.queue.add(batchEntry);
+		this.queue.offer(batchEntry);
 		if (this.queue.size() >= this.actions) {
-			write();
+			writeAsync();
 		}
 	}
 
@@ -196,7 +248,7 @@ public class BatchProcessor {
 	 */
 	void flush() {
 		this.write();
-		this.scheduler.shutdown();
+		this.executor.shutdown();
 	}
 
 }
